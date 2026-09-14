@@ -1127,8 +1127,15 @@ class Domino {
         await this.audio.captureSystemAudio();
         this.toast.show('Listening to everything this computer plays.');
       } catch (err) {
+        // The fallback worth suggesting is not the same on both platforms:
+        // Windows needs a third-party loopback device, while on Linux the
+        // monitor inputs are already sitting in the Mic button's device list.
+        const fallback =
+          window.domino.platform === 'linux'
+            ? 'Try the Mic button and pick a "Monitor of ..." input.'
+            : 'Try the Mic button with a loopback device such as VB-Cable or Stereo Mix.';
         this.toast.show(
-          `System audio capture failed: ${(err as Error).message}. Try the Mic button with a loopback device such as VB-Cable or Stereo Mix.`,
+          `System audio capture failed: ${(err as Error).message}. ${fallback}`,
           'error',
         );
       }

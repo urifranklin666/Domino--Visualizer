@@ -129,11 +129,22 @@ export const DEFAULT_SETTINGS: AppSettings = {
   virtualCameraName: 'Domino Visualizer',
 };
 
-/** What the main process knows about the Windows virtual camera. */
+/**
+ * What the main process knows about the virtual camera.
+ *
+ * Deliberately platform-neutral. Windows publishes a camera through a Media
+ * Foundation source registered machine-wide, Linux through a v4l2loopback
+ * device, and the renderer should not have to know which - so the fields below
+ * describe the *state* both share and the strings the panel needs come ready
+ * written from whichever backend is in use.
+ */
 export interface VirtualCameraStatus {
   /** The native module compiled and loaded on this machine. */
   available: boolean;
-  /** The media source is registered machine-wide and its DLL still exists. */
+  /**
+   * There is somewhere to publish: a registered media source on Windows, a
+   * free loopback device on Linux.
+   */
   registered: boolean;
   running: boolean;
   width: number;
@@ -142,20 +153,51 @@ export interface VirtualCameraStatus {
   framesWritten: number;
   registeredPath: string;
   /**
-   * The registered driver is the same binary this copy of Domino ships.
-   * A stale registration loads an older DLL, which opens to a black camera.
+   * The setup in place belongs to this copy of Domino.
+   *
+   * Only Windows can be wrong about this: registration records a path, and a
+   * stale one loads an older DLL that opens to a black camera. A Linux
+   * loopback device belongs to the running kernel and has no such failure
+   * mode, so that backend reports true whenever it is ready.
    */
   registeredIsThisBuild: boolean;
-  /** The DLL a user would hand to regsvr32; empty when this build has none. */
+  /** The driver or device the camera comes from; empty when there is none. */
   sourcePath: string;
   /** The native module on disk; empty when it was not packaged. */
   modulePath: string;
+  /**
+   * Button text for the one-time setup step, or '' when there is nothing the
+   * user can usefully press - registering the driver on Windows, loading the
+   * kernel module on Linux.
+   */
+  setupAction: string;
+  /** Tooltip saying what that button will actually run. */
+  setupHint: string;
+  /** Why the camera is not ready yet, phrased for this platform. */
+  setupNote: string;
+  /**
+   * What the camera is actually called in other applications.
+   *
+   * Not always the name in settings. A Linux loopback device carries the card
+   * label the kernel module was loaded with, which Domino cannot change from
+   * here, so the setting is advisory on that platform and this is the truth.
+   */
+  publishedName: string;
   error: string;
 }
 
 /** The API surface exposed on `window.domino` by the preload script. */
 export interface DominoApi {
   platform: NodeJS.Platform;
+  /**
+   * How this machine captures what it is playing.
+   *
+   * 'display-loopback' is Chromium's WASAPI loopback, answered through
+   * getDisplayMedia. 'pulse-monitor' is Linux, where the default capture device
+   * has been pointed at the desktop output mix instead. 'none' means neither
+   * is available here.
+   */
+  audioLoopback: 'display-loopback' | 'pulse-monitor' | 'none';
   versions: { electron: string; chrome: string; node: string };
 
   library: {
@@ -202,9 +244,12 @@ export interface DominoApi {
     status(): Promise<VirtualCameraStatus>;
     start(width: number, height: number, fps: number, name: string): Promise<VirtualCameraStatus>;
     stop(): Promise<VirtualCameraStatus>;
-    /** Prompts for administrator rights to register the camera driver. */
+    /**
+     * Runs the one-time setup step, prompting for elevated rights: registering
+     * the media source on Windows, loading v4l2loopback on Linux.
+     */
     register(unregister?: boolean): Promise<VirtualCameraStatus>;
-    /** Every capture device Windows can see, for confirming ours appeared. */
+    /** Every capture device the OS can see, for confirming ours appeared. */
     listCameras(): Promise<string[]>;
     /** Fire-and-forget: one NV12 frame, already packed by the GPU. */
     sendFrame(frame: Uint8Array): void;

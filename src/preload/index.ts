@@ -12,6 +12,20 @@ import type {
 
 const api: DominoApi = {
   platform: process.platform,
+  /*
+   * How this machine can capture what it is playing, decided by the main
+   * process at startup. 'pulse-monitor' means the default capture device has
+   * been pointed at the desktop's output mix; 'display-loopback' is Chromium's
+   * WASAPI loopback via getDisplayMedia; 'none' means neither is available and
+   * the renderer should say so rather than capturing a microphone and calling
+   * it system audio.
+   */
+  audioLoopback:
+    process.env.DOMINO_AUDIO_LOOPBACK === 'pulse-monitor'
+      ? 'pulse-monitor'
+      : process.platform === 'linux'
+        ? 'none'
+        : 'display-loopback',
   versions: {
     electron: process.versions.electron,
     chrome: process.versions.chrome,

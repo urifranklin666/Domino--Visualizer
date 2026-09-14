@@ -1,5 +1,65 @@
 # Changelog
 
+## Unreleased
+
+**Domino runs on Linux.** Everything the app does on Windows it now does on a
+Linux desktop too, virtual camera included, and Windows is untouched.
+
+Most of Domino was already portable - the whole renderer, the MilkDrop engine,
+the Shadertoy runtime, the library and settings. What was not portable was the
+two features that reach into the operating system, and both are genuinely
+different here rather than ported.
+
+**Publishing as a webcam** goes through `v4l2loopback` instead of Media
+Foundation. On Windows an application cannot be a camera: it has to ship a COM
+media source that Windows hosts in the Frame Server, and feed it across a
+process boundary through shared memory. On Linux the kernel module *is* the
+device, so the new backend opens `/dev/videoN`, negotiates NV12 and writes
+frames - about two hundred lines replacing four thousand, with no second
+process, no COM, no shared memory and no machine-wide registration. The GPU
+NV12 packing path is untouched and feeds the kernel directly; an I420 fallback
+handles a kernel that will not take NV12.
+
+The one-time setup step is a loaded kernel module rather than a registered DLL,
+so the panel offers **Load camera module**, which runs `modprobe` through
+`pkexec` - one polkit prompt, once per boot, the same bargain as the UAC prompt
+on Windows. It asks for `exclusive_caps=1`, without which Chrome, Firefox and
+Zoom all skip a loopback node that has never had a producer. Where a device
+exists but is already taken, **Add loopback device** adds another instead of
+reloading the module out from under whatever is using it - Domino will not stop
+your OBS stream to save you a command.
+
+**Hearing the whole machine** takes a different route too. Linux has no
+equivalent of the WASAPI loopback Chromium hands us on Windows, and Chromium
+deliberately hides PulseAudio monitor sources from `enumerateDevices()`, so
+there is no device for the app to pick. Domino instead points `PULSE_SOURCE` at
+`@DEFAULT_MONITOR@` before the audio service starts, which makes the plain
+default capture device the desktop output mix. The sound server resolves that
+on every stream rather than once at launch, so it follows you from speakers to
+headphones without a restart. The Mic button now names a real input device
+explicitly, since "default" is no longer a microphone.
+
+**Also**
+
+- The virtual camera is split into per-platform backends behind one interface,
+  so the main process, the IPC surface and the renderer no longer know or care
+  which operating system is publishing.
+- The settings panel's copy for the setup step now comes from whichever backend
+  is running, instead of the renderer hardcoding `regsvr32` and "administrator
+  rights" at a Linux user.
+- The panel reports what the camera is *actually* called. On Linux the card
+  label belongs to the kernel module and is fixed when it loads, so the name in
+  settings is advisory - and telling someone to look for "Domino Visualizer"
+  when the device says "Dummy video device" is how you lose ten minutes.
+- Releases now build on Windows and Linux in parallel, with an AppImage added
+  to the artefacts. The Linux CI job loads `v4l2loopback` so the camera tests
+  run against the real kernel device rather than skipping.
+- `npm run test:native` dispatches to a per-platform suite. The Linux one
+  publishes a frame and reads it back through a V4L2 capture client, comparing
+  the pixels byte for byte.
+- The packaged-build selftest no longer fails on Linux for the absence of a
+  media source DLL that has no business existing there.
+
 ## 0.4.1
 
 **Fixes the camera producing no output.** Two separate causes, both of which

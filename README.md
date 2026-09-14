@@ -7,8 +7,8 @@ also take your **webcam as a shader input** and publish itself back out **as a
 webcam**, so the visuals go straight into Zoom, Discord or Meet.
 
 Built with Electron + TypeScript + WebGL2. No third-party visualizer libraries —
-the MilkDrop equation compiler, warp engine, HLSL translator and Media Foundation
-camera driver are all original.
+the MilkDrop equation compiler, warp engine, HLSL translator and the virtual
+camera backends on both platforms are all original.
 
 ## Download
 
@@ -16,12 +16,14 @@ Grab the latest **[Release](../../releases)** and pick one:
 
 | File | What it is |
 |---|---|
-| `Domino-Setup-x.y.z.exe` | Installer. Start-menu and desktop shortcuts, uninstall entry, installs per-user so it needs no admin rights. |
-| `Domino-x.y.z-portable.exe` | Single file. Run it, no install. Good for a USB stick. |
+| `Domino-Setup-x.y.z.exe` | Windows installer. Start-menu and desktop shortcuts, uninstall entry, installs per-user so it needs no admin rights. |
+| `Domino-x.y.z-portable.exe` | Windows, single file. Run it, no install. Good for a USB stick. |
+| `Domino-x.y.z-x86_64.AppImage` | Linux, single file. `chmod +x` and run it, no install. |
 
-Windows 10/11, 64-bit. Any GPU from the last decade will do — it needs WebGL2.
+Windows 10/11 or a 64-bit Linux desktop. Any GPU from the last decade will do —
+it needs WebGL2.
 
-> **SmartScreen warning:** the builds are unsigned, so Windows will show
+> **SmartScreen warning:** the Windows builds are unsigned, so Windows will show
 > "Windows protected your PC" the first time. Click **More info → Run anyway**.
 > Signing requires a paid code-signing certificate; until there is one, that
 > prompt is expected.
@@ -34,14 +36,23 @@ npm run dev         # development, with hot reload
 npm run build       # production build into out/
 npm start           # run the production build
 npm run dist:win    # package installer + portable exe into release/
+npm run dist:linux  # package AppImage into release/
 npm run gen:presets # regenerate the generated preset families
 npm run gen:icon    # regenerate build/icon.ico
 ```
 
+The virtual camera is a C++ addon and is built separately, because most work on
+Domino does not touch it:
+
+```bash
+npm run build:native # compile the addon for this platform
+npm run test:native  # exercise it against the OS
+```
+
 Cutting a release: `npm version patch && git push --follow-tags`. The GitHub
-Actions workflow builds both artefacts, runs the full test suite, verifies the
-*packaged* binary boots and finds its preset library, and attaches the files to
-a published Release.
+Actions workflow builds on Windows and Linux in parallel, runs the full test
+suite on each, verifies the *packaged* binary boots and finds its preset
+library, and attaches every artefact to a published Release.
 
 ---
 
@@ -49,11 +60,20 @@ a published Release.
 
 ### Hears the whole machine
 
-Click **System Audio** and Domino taps the Windows audio render endpoint
-directly (WASAPI loopback), capturing the full output mix — Spotify, a browser
-tab, a game, a DAW, all of it at once. There is no source picker and no screen
-sharing: the main process answers the renderer's `getDisplayMedia` request with
-`audio: 'loopback'`, and the video track is discarded immediately.
+Click **System Audio** and Domino captures the full output mix — Spotify, a
+browser tab, a game, a DAW, all of it at once. There is no source picker and no
+screen sharing.
+
+How it gets there differs by platform, and neither route asks the user anything.
+On Windows the main process answers the renderer's `getDisplayMedia` request
+with `audio: 'loopback'` — Chromium's WASAPI render-endpoint loopback — and
+discards the video track immediately. Linux has no such capability, and
+Chromium deliberately hides PulseAudio monitor sources from
+`enumerateDevices()`, so there is nothing to pick; instead Domino points
+`PULSE_SOURCE` at `@DEFAULT_MONITOR@` before the audio service starts, which
+makes the plain default capture device the desktop mix. Because that is
+resolved by the sound server on every stream rather than once at launch, it
+keeps following you from speakers to headphones mid-session.
 
 Other inputs: **Mic**, any input device, or **File…** for local audio (which also
 plays out of your speakers).
@@ -189,21 +209,39 @@ Shadertoy shaders that used a `webcam` input map onto this directly on import.
 
 Turn on **Publish as Webcam** in **Display > Virtual Camera** and Domino shows
 up as a camera in Zoom, Discord, Meet, OBS or anything else that takes one. No
-capture card, no screen share, no OBS virtual-camera plugin in between - this
-is a Media Foundation media source written for Domino.
+capture card, no screen share, no OBS virtual-camera plugin in between.
 
 Frames leave the GPU already packed as NV12 by a fragment shader and are read
-back through pixel buffer objects, so publishing does not stall the visuals.
-They cross into the Windows Frame Server through a lock-free shared-memory ring
-- a stalled conferencing app can never slow the render loop down, it just misses
-a frame.
+back through pixel buffer objects, so publishing never stalls the visuals. That
+much is shared; below it the two platforms have nothing in common.
 
-Windows loads the camera driver inside its own service process, which means the
-COM registration has to be machine-wide. **Register camera driver** in the same
-panel does that with one Windows administrator prompt; it runs the standard
-`regsvr32` against the shipped DLL and is needed exactly once. There is an
-**Unregister** button beside it, because the uninstaller cannot remove it
-without elevation of its own.
+**Windows** will not let an application simply *be* a camera. The camera is a
+Media Foundation media source — a COM class that Windows creates inside its own
+Frame Server process — so Domino ships one, written for this, and frames cross
+the process boundary through a lock-free shared-memory ring. A stalled
+conferencing app can never slow the render loop down; it just misses a frame.
+Because the Frame Server runs as LocalService, the COM registration has to be
+machine-wide: **Register camera driver** does that with one administrator
+prompt, running the standard `regsvr32` against the shipped DLL, and is needed
+exactly once. There is an **Unregister** button beside it, because the
+uninstaller cannot remove it without elevation of its own.
+
+**Linux** needs none of that. `v4l2loopback` *is* the camera device, so
+publishing is opening `/dev/videoN`, negotiating NV12 and writing frames — the
+whole backend is about two hundred lines against the kernel's uapi headers, with
+no second process, no COM and no shared memory. What it does need is for a
+loopback device to exist, which means an out-of-tree kernel module: install
+`v4l2loopback-dkms` (or `akmod-v4l2loopback` on Fedora), then **Load camera
+module** runs `modprobe` through `pkexec` — one polkit prompt, once per boot.
+It asks for `exclusive_caps=1`, without which Chrome, Firefox and Zoom all skip
+a loopback node that has never had a producer. Where a device already exists but
+is taken, **Add loopback device** adds one more rather than reloading the module
+out from under whatever is using it.
+
+One asymmetry worth knowing: the camera's name is yours to choose on Windows,
+but on Linux the card label belongs to the kernel module and is fixed when it
+loads. The settings field is advisory there, and the panel tells you what the
+camera is actually called.
 
 ### Runs MilkDrop presets
 
@@ -427,9 +465,12 @@ Honest notes on where this is an approximation rather than a port:
 - **Motion vectors** are drawn as a simple field rather than sampling the true
   warp field.
 - **Textured custom shapes** ignore the `textured` flag and render flat.
-- **System-audio loopback** is a Windows/Chromium capability. On macOS and Linux
-  it depends on OS support; use **Mic** with a loopback device (VB-Cable,
-  BlackHole, Stereo Mix, PulseAudio monitor) as the fallback.
+- **System-audio loopback** works on Windows (WASAPI) and on Linux with a
+  PulseAudio or PipeWire server. On a bare-ALSA machine there is no output
+  monitor to capture and the button says so; use **Mic** with a loopback device
+  as the fallback. macOS is not supported at all.
+- **The virtual camera** is Windows and Linux only, and on Linux it needs the
+  `v4l2loopback` kernel module, which Domino can load but cannot install.
 - The renderer bundle is large (~6.5 MB) because it includes all of Monaco.
   Trimming it to just the core editor would cut most of that.
 

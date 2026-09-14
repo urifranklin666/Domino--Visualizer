@@ -280,32 +280,30 @@ export class DisplayPanel {
       ),
     );
 
-    // Registration is a one-time administrator step, so the button only shows
-    // when it is actually the thing standing in the way - including when a
-    // different copy of Domino is the one currently registered.
-    if (status?.available && (!status.registered || !status.registeredIsThisBuild)) {
-      const register = document.createElement('button');
-      register.className = 'btn btn-ghost';
-      register.style.width = '100%';
-      register.textContent = status.registered
-        ? 'Re-register camera driver'
-        : 'Register camera driver';
-      register.title =
-        'Runs regsvr32 as administrator. Windows will show its usual prompt.';
-      register.addEventListener('click', () => this.onVirtualCameraRegister?.(false));
-      section.appendChild(register);
-    }
+    /*
+     * The setup step, offered only when it is the thing standing in the way -
+     * or, once it is done, as the way to leave the machine clean again.
+     *
+     * The label and tooltip come from the main process rather than from here.
+     * What this button does is genuinely different per platform - regsvr32
+     * under UAC on Windows, modprobe under pkexec on Linux - and a renderer
+     * that tried to word that itself would be guessing at the state of a
+     * machine it cannot see.
+     */
+    const needsSetup = Boolean(status?.available) &&
+      (!status!.registered || !status!.registeredIsThisBuild);
+    // Removing it while frames are going out would pull the device away from
+    // whatever is watching, so it is only offered once publishing has stopped.
+    const canUndo = Boolean(status?.registered && status.registeredIsThisBuild && !status.running);
 
-    // Offered while it is registered so the machine can be left clean. The
-    // uninstaller cannot do this itself: it does not run elevated.
-    if (status?.registered && status.registeredIsThisBuild && !status.running) {
-      const remove = document.createElement('button');
-      remove.className = 'btn btn-ghost';
-      remove.style.width = '100%';
-      remove.textContent = 'Unregister camera driver';
-      remove.title = 'Removes the machine-wide registration. Also needs administrator rights.';
-      remove.addEventListener('click', () => this.onVirtualCameraRegister?.(true));
-      section.appendChild(remove);
+    if (status?.setupAction && (needsSetup || canUndo)) {
+      const button = document.createElement('button');
+      button.className = 'btn btn-ghost';
+      button.style.width = '100%';
+      button.textContent = status.setupAction;
+      button.title = status.setupHint;
+      button.addEventListener('click', () => this.onVirtualCameraRegister?.(!needsSetup));
+      section.appendChild(button);
     }
 
     const note = document.createElement('div');
@@ -314,34 +312,36 @@ export class DisplayPanel {
     section.appendChild(note);
   }
 
-  /** One line telling the user exactly where this stands, good or bad. */
+  /**
+   * One line telling the user exactly where this stands, good or bad.
+   *
+   * Anything specific to how this platform publishes a camera arrives as
+   * `setupNote`, already written by the backend that knows. What is left here
+   * is the part that reads the same everywhere.
+   */
   private virtualCameraNote(status: VirtualCameraStatus | null): string {
     if (!status) return 'Checking for the camera driver...';
     if (!status.available) {
       return status.error || 'This build of Domino has no virtual camera module.';
     }
-    if (!status.registered) {
-      return (
-        status.error ||
-        'Windows loads the camera driver in its own process, which needs a ' +
-          'one-time machine-wide registration. This asks for administrator ' +
-          'rights once and never again.'
-      );
-    }
-    if (!status.registeredIsThisBuild) {
-      return (
-        'A different copy of Domino is registered as the camera driver ' +
-        `(${status.registeredPath}). Re-register to point Windows at this one.`
-      );
+    if (!status.registered || !status.registeredIsThisBuild) {
+      return status.setupNote || status.error || 'The camera is not ready yet.';
     }
     if (status.error) return status.error;
+
+    // What other applications will actually show. On Linux the card label
+    // belongs to the kernel module, so telling the user to look for the name in
+    // settings would send them hunting for a camera that is listed under
+    // something else.
+    const shown = status.publishedName || String(this.settings.virtualCameraName);
+
     if (status.running) {
-      return `Live at ${status.width}x${status.height}, ${status.fps}fps. ${status.framesWritten} frames sent. Pick "${this.settings.virtualCameraName}" in your video app.`;
+      return `Live at ${status.width}x${status.height}, ${status.fps}fps. ${status.framesWritten} frames sent. Pick "${shown}" in your video app.`;
     }
     return (
-      'Ready. Switch this on first, then open Zoom or Discord and choose ' +
-      'Domino - call apps read the camera list when they start, so they will ' +
-      'not see it if Domino was switched on afterwards.'
+      `Ready. Switch this on first, then open Zoom or Discord and choose "${shown}" ` +
+      '- call apps read the camera list when they start, so they will not see ' +
+      'it if Domino was switched on afterwards.'
     );
   }
 

@@ -1,17 +1,24 @@
 /**
- * Virtual camera, end to end, through Windows.
+ * Virtual camera, end to end.
  *
  * Run with: npm run test:vcam   (requires `npm run build`, `npm run build:native`
- * and a registered camera driver)
+ * and a camera device the app can publish into)
  *
  * Everything else in the suite stops at the edge of the operating system. This
  * one goes all the way: it boots the real app, turns the camera on by clicking
  * the same checkbox a user would, and then opens that camera from a *separate
- * process* - which is the only way to exercise the hop through the Windows
- * Frame Server, since Windows hosts the media source in its own service.
+ * process*, which is the only arrangement that resembles a video call. On
+ * Windows that is also the only way to exercise the hop through the Frame
+ * Server, since Windows hosts the media source in its own service; on Linux
+ * the frames go through the kernel instead, and a second process is what keeps
+ * the test honest about reading them back the way any other application would.
  *
- * It cannot run in CI: publishing a camera needs the driver registered
- * machine-wide, which needs administrator rights once. It skips cleanly when
+ * The same script covers both, because what it asserts - frames arrive, they
+ * carry a picture, streaming does not stall, and the app stays responsive
+ * throughout - is the same question on either platform.
+ *
+ * It cannot run in CI: publishing needs a one-time privileged setup step
+ * (registering the driver, or loading v4l2loopback). It skips cleanly when
  * that has not been done.
  */
 const { app, BrowserWindow } = require('electron');
@@ -148,24 +155,32 @@ app.whenReady().then(async () => {
   const vcam = require(ADDON);
   const registration = vcam.isRegistered();
   if (!registration.registered) {
-    console.log('  SKIPPED: the camera driver is not registered on this machine.');
-    console.log('  Register it once from the app, or with:');
-    console.log('    regsvr32 <install dir>\\resources\\native\\domino_vcam_source.dll');
+    console.log('  SKIPPED: there is nowhere to publish a camera on this machine.');
+    if (process.platform === 'win32') {
+      console.log('  Register the driver once from the app, or with:');
+      console.log('    regsvr32 <install dir>\\resources\\native\\domino_vcam_source.dll');
+    } else {
+      console.log('  Create a loopback device from the app, or with:');
+      console.log('    sudo modprobe v4l2loopback devices=1 exclusive_caps=1 \\');
+      console.log('      card_label="Domino Visualizer"');
+    }
     app.exit(0);
     return;
   }
-  info('driver registered at', registration.path);
+  info(process.platform === 'win32' ? 'driver registered at' : 'publishing into',
+    registration.path);
 
   /*
    * The registered driver is a path, and it may well point at an installed
    * copy of Domino rather than this working tree. Publishing would then
    * exercise somebody else's DLL, so this is a skip rather than a failure -
-   * and saying so beats a red run that looks like a regression.
+   * and saying so beats a red run that looks like a regression. Linux has no
+   * equivalent: the device belongs to the kernel, not to a build.
    */
   const status0 = await win.webContents.executeJavaScript(
     'window.domino.virtualCamera.status()',
   );
-  if (!status0.registeredIsThisBuild) {
+  if (process.platform === 'win32' && !status0.registeredIsThisBuild) {
     console.log('  SKIPPED: a different build is registered as the camera driver.');
     console.log(`    registered: ${status0.registeredPath}`);
     console.log(`    this build: ${status0.sourcePath}`);
@@ -176,7 +191,8 @@ app.whenReady().then(async () => {
 
   const toggled = await win.webContents.executeJavaScript(ENABLE_CAMERA);
   check('the Publish as Webcam control exists', toggled.found === true);
-  check('the control is enabled once the driver is registered', toggled.disabled !== true);
+  check('the control is enabled once there is somewhere to publish',
+    toggled.disabled !== true);
   if (!toggled.found || toggled.disabled) {
     app.exit(1);
     return;
@@ -200,18 +216,27 @@ app.whenReady().then(async () => {
   }
   info('publishing', `${status.width}x${status.height} @ ${status.fps}fps, ${status.framesWritten} frames sent`);
 
+  /*
+   * What the camera is actually called to everything else. Windows publishes
+   * under the name it is given; a Linux loopback device carries the card label
+   * its kernel module was loaded with, which may well not say Domino at all -
+   * so looking for our own name there would fail on a perfectly working setup.
+   */
+  const cameraName = status.publishedName || 'Domino';
+  info('published as', cameraName);
+
   const cameras = await win.webContents.executeJavaScript(
     'window.domino.virtualCamera.listCameras()',
   );
   check(
-    'the camera appears in the Windows device list',
-    cameras.some((c) => c.includes(status.width ? 'Domino' : 'Domino')),
+    'the camera appears in the system device list',
+    cameras.some((c) => c.includes(cameraName)),
     JSON.stringify(cameras),
   );
 
   let shot;
   try {
-    shot = captureFromAnotherProcess('Domino', 15000);
+    shot = captureFromAnotherProcess(cameraName, 15000);
   } catch (err) {
     check('another process can open the camera', false, err.message);
     app.exit(1);
@@ -250,7 +275,7 @@ app.whenReady().then(async () => {
     `standard deviation ${shot.stdev.toFixed(2)} across the luma plane`,
   );
   check(
-    'the frame is not the black fallback the source emits with no producer',
+    'the frame is not the black one a camera with no producer hands back',
     shot.max > 32,
     `brightest luma ${shot.max}`,
   );
@@ -258,7 +283,7 @@ app.whenReady().then(async () => {
   /* --------------------- sustained streaming --------------------- */
 
   const STREAM_MS = 10000;
-  const streamer = streamFromAnotherProcess('Domino', STREAM_MS);
+  const streamer = streamFromAnotherProcess(cameraName, STREAM_MS);
   let streamOut = '';
   streamer.stdout.on('data', (d) => {
     streamOut += d;
@@ -308,6 +333,9 @@ app.whenReady().then(async () => {
     `${stream.frames} frames over ${STREAM_MS}ms`);
   check('the stream does not stall', (stream.longestGapMs ?? 9999) < 1500,
     `longest gap ${stream.longestGapMs}ms`);
+  // Windows-only: a Media Foundation source can signal end-of-stream, and
+  // doing so mid-call is a specific failure it has had. Nothing on Linux
+  // reports this, where an absent field reads as "did not happen".
   check('the stream does not end early', stream.endOfStream !== true);
   check('the app stays responsive while a consumer streams', unanswered === 0,
     `${unanswered} unanswered probes, worst round-trip ${worstRoundTrip}ms`);

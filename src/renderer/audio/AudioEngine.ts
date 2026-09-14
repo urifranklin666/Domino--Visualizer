@@ -203,27 +203,35 @@ export class AudioEngine {
   /**
    * Capture everything the computer is playing.
    *
-   * The main process answers our getDisplayMedia request with `audio: 'loopback'`,
-   * so this returns the full output mix. We ask for video because getDisplayMedia
-   * requires it, then stop the video track immediately - the audio track keeps
-   * running on its own and we avoid paying for screen capture.
+   * Two routes, because the operating systems genuinely differ.
+   *
+   * On Windows the main process answers our getDisplayMedia request with
+   * `audio: 'loopback'`, which is Chromium's WASAPI render-endpoint loopback -
+   * the full output mix, no source picker. We ask for video because
+   * getDisplayMedia is defined in terms of it, then stop that track at once so
+   * we never pay for screen capture.
+   *
+   * On Linux that does not exist, and Chromium hides PulseAudio's monitor
+   * sources from enumerateDevices(), so there is no device to pick either. The
+   * main process instead points PULSE_SOURCE at the monitor of the default
+   * sink before the audio service starts, which makes the plain *default*
+   * capture device the desktop mix - so here that is simply what we open.
    */
   async captureSystemAudio(): Promise<void> {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: {
-          // Every bit of "helpful" processing distorts what we're visualizing.
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        } as MediaTrackConstraints,
-      });
+      const mode = window.domino?.audioLoopback ?? 'display-loopback';
 
-      for (const track of stream.getVideoTracks()) {
-        track.stop();
-        stream.removeTrack(track);
+      if (mode === 'none') {
+        throw new Error(
+          'No PulseAudio or PipeWire server was found, so there is no way to ' +
+            'capture desktop audio on this machine.',
+        );
       }
+
+      const stream =
+        mode === 'pulse-monitor'
+          ? await this.openDefaultCapture()
+          : await this.openDisplayLoopback();
 
       if (stream.getAudioTracks().length === 0) {
         throw new Error(
@@ -239,11 +247,65 @@ export class AudioEngine {
     }
   }
 
+  /** The Windows route: a loopback audio track dressed up as screen capture. */
+  private async openDisplayLoopback(): Promise<MediaStream> {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: {
+        // Every bit of "helpful" processing distorts what we're visualizing.
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      } as MediaTrackConstraints,
+    });
+
+    for (const track of stream.getVideoTracks()) {
+      track.stop();
+      stream.removeTrack(track);
+    }
+    return stream;
+  }
+
+  /**
+   * The Linux route: the default capture device, which main has redirected.
+   *
+   * Asking for 'default' by name rather than leaving deviceId unset is
+   * deliberate. They behave the same today, but the distinction is the whole
+   * mechanism here, and an unconstrained request is exactly the kind of thing
+   * a future Chromium could answer with "the most recently used microphone".
+   */
+  private async openDefaultCapture(): Promise<MediaStream> {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: { exact: 'default' },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+      video: false,
+    });
+  }
+
+  /**
+   * Listen to a microphone.
+   *
+   * With no device named this normally means "whatever the system default is",
+   * but on Linux the main process has redirected that default to the desktop
+   * output mix - so asking for it would hand back the music rather than the
+   * room, under a label saying Microphone. Where that redirection is in force,
+   * an unqualified request resolves to a real input device first.
+   */
   async captureMicrophone(deviceId?: string): Promise<void> {
     try {
+      const id =
+        deviceId ??
+        (window.domino?.audioLoopback === 'pulse-monitor'
+          ? await this.firstRealInputDevice()
+          : undefined);
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          deviceId: deviceId ? { exact: deviceId } : undefined,
+          deviceId: id ? { exact: id } : undefined,
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
@@ -293,6 +355,25 @@ export class AudioEngine {
     // Labels are blank until some capture permission has been granted once.
     const devices = await navigator.mediaDevices.enumerateDevices();
     return devices.filter((d) => d.kind === 'audioinput');
+  }
+
+  /**
+   * A named capture device, skipping the aliases.
+   *
+   * 'default' and 'communications' are Chromium's indirections rather than
+   * hardware, and 'default' is precisely the one pointed at the desktop mix.
+   * Returns undefined when there is nothing else, which leaves the caller to
+   * fall back to an unconstrained request - wrong, but less wrong than
+   * refusing to open a microphone at all.
+   */
+  private async firstRealInputDevice(): Promise<string | undefined> {
+    try {
+      const devices = await this.listInputDevices();
+      return devices.find((d) => d.deviceId !== 'default' && d.deviceId !== 'communications')
+        ?.deviceId;
+    } catch {
+      return undefined;
+    }
   }
 
   private resetAnalysis(): void {

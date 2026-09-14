@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dist": "electron-vite build && electron-builder",
     "dist:win": "electron-vite build && electron-builder --win",
+    "dist:linux": "electron-vite build && electron-builder --linux",
     "test:eel": "esbuild test/eel.test.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/eel.test.cjs --log-level=warning && node node_modules/.cache/eel.test.cjs",
     "test:milk": "esbuild test/milk.test.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/milk.test.cjs --log-level=warning && node node_modules/.cache/milk.test.cjs",
     "test:smoke": "electron test/smoke.cjs",
@@ -79,6 +80,48 @@
             "x64"
           ]
         }
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "maintainer": "dead plug <deadletters@deadplug.digital>",
+      "category": "AudioVideo",
+      "synopsis": "Music visualizer that listens to everything your computer plays",
+      "desktop": {
+        "entry": {
+          "Categories": "AudioVideo;Audio;Player;Graphics;",
+          "Keywords": "visualizer;milkdrop;shadertoy;audio;music;"
+        }
+      },
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Domino-${version}-${arch}.${ext}"
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libsecret-1-0"
+      ],
+      "recommends": [
+        "v4l2loopback-dkms"
       ]
     },
     "nsis": {

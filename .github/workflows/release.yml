@@ -3,8 +3,8 @@ name: Release
 # Push a version tag to cut a release:
 #   npm version patch && git push --follow-tags
 #
-# The workflow builds the Windows installer and portable exe, verifies the
-# packaged binary actually runs, and attaches both to a GitHub Release.
+# The workflow builds for Windows and Linux, verifies each packaged binary
+# actually runs, and attaches all of them to a GitHub Release.
 on:
   push:
     tags:
@@ -77,8 +77,97 @@ jobs:
             release/Domino-Setup-*.exe
             release/Domino-*-portable.exe
 
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # xvfb because the runner is headless and the smoke test boots the real
+      # app. v4l2loopback so the virtual camera tests exercise the kernel
+      # device rather than skipping - it is a DKMS module, so this builds it
+      # against the runner's kernel and takes a minute.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb v4l2loopback-dkms v4l-utils v4l2loopback-utils
+
+      # exclusive_caps=1 matches what Domino asks for when it loads the module
+      # itself, and is what makes the device visible to applications that skip
+      # a loopback node with no producer.
+      - name: Create a loopback device
+        run: |
+          sudo modprobe v4l2loopback devices=1 exclusive_caps=1 card_label="Domino Visualizer"
+          v4l2-ctl --list-devices || true
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The Linux virtual camera is a C++ Node addon over v4l2loopback. It is
+      # shipped inside the package, so it is built before packaging rather than
+      # left to the user.
+      - name: Build native modules
+        run: npm run build:native
+
+      - name: Unit tests
+        run: npm test
+
+      # Publishes into the loopback device created above and reads the frames
+      # back through a V4L2 capture client. Needs no elevated rights now that
+      # the module is loaded.
+      - name: Virtual camera tests
+        run: npm run test:native
+
+      - name: Build
+        run: npm run build
+
+      # Boots the real app and checks every bundled visual compiles and
+      # renders. The runner has no audio output for a monitor source to
+      # follow, so the loopback assertions are skipped there; they are a hard
+      # gate on a real machine.
+      - name: Smoke test
+        run: xvfb-run -a npm run test:smoke
+        env:
+          DOMINO_SMOKE_NO_AUDIO: '1'
+
+      - name: Package
+        run: npx electron-builder --linux --publish never
+
+      # The packaging step changes how the bundled library is located, so the
+      # shipped binary is verified separately from the dev build.
+      - name: Verify packaged build
+        run: |
+          out=$(xvfb-run -a ./release/linux-unpacked/domino --selftest 2>&1)
+          echo "$out"
+          echo "$out" | grep -q 'SELFTEST PASSED'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: domino-linux
+          path: |
+            release/Domino-*.AppImage
+            release/Domino-*.deb
+
+  release:
+    needs: [windows, linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           # Published, not a draft. A draft is invisible to everyone but the
@@ -94,6 +183,16 @@ jobs:
             registration: open **Display → Virtual Camera → Register camera
             driver** and approve the Windows prompt. It is asked for once and
             never again, and there is an Unregister button beside it.
+
+            **Linux.** Take the `.AppImage` and run it from anywhere, or
+            install the `.deb`.
+
+            Publishing Domino as a webcam needs the `v4l2loopback` kernel
+            module. Install it from your package manager
+            (`v4l2loopback-dkms` on Debian, Ubuntu and Arch,
+            `akmod-v4l2loopback` on Fedora), then open **Display → Virtual
+            Camera → Load camera module** and approve the prompt. That is
+            asked for once per boot.
           files: |
-            release/Domino-Setup-*.exe
-            release/Domino-*-portable.exe
+            artifacts/domino-windows/*
+            artifacts/domino-linux/*

@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, session, desktopCapturer, shell } from 'electron';
 import path from 'node:path';
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import type { LibraryKind, ReadResult, WriteResult, AppSettings } from '@shared/types';
 import {
   listLibrary,
@@ -33,6 +33,53 @@ app.commandLine.appendSwitch(
 );
 // The renderer does its own smoothing/AGC, so let Chromium hand us raw samples.
 app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling');
+
+/**
+ * Point Chromium's default capture device at the desktop's output mix.
+ *
+ * Linux has no equivalent of the WASAPI loopback Windows hands us, and
+ * Chromium deliberately hides PulseAudio monitor sources from
+ * enumerateDevices(), so there is no device the renderer could simply pick.
+ * What PulseAudio does honour is PULSE_SOURCE: whatever it names becomes the
+ * "default" capture device for this process and its children, the audio
+ * service included.
+ *
+ * @DEFAULT_MONITOR@ is resolved by the server on every stream rather than once
+ * at launch, so this keeps following the default sink when the user switches
+ * from speakers to headphones mid-session.
+ *
+ * This only redirects the *default* device. An explicit deviceId still opens
+ * the device it names, which is what keeps the Mic button pointed at a real
+ * microphone - see AudioEngine.captureMicrophone.
+ */
+function configureSystemAudioCapture(): void {
+  if (process.platform !== 'linux') return;
+
+  // Someone who has set this themselves has a reason, and silently overriding
+  // it would break a deliberate routing setup.
+  if (process.env.PULSE_SOURCE) {
+    process.env.DOMINO_AUDIO_LOOPBACK = 'pulse-monitor';
+    return;
+  }
+
+  /*
+   * Only worth doing when there is actually a PulseAudio or PipeWire server to
+   * honour it. On a bare ALSA machine the variable would be ignored and the
+   * default device would be a microphone, so the renderer needs to know it
+   * cannot promise system audio rather than quietly capturing the room.
+   */
+  const socket =
+    process.env.PULSE_SERVER ??
+    (process.env.XDG_RUNTIME_DIR
+      ? path.join(process.env.XDG_RUNTIME_DIR, 'pulse', 'native')
+      : '');
+  if (!socket || (!socket.includes(':') && !existsSync(socket))) return;
+
+  process.env.PULSE_SOURCE = '@DEFAULT_MONITOR@';
+  process.env.DOMINO_AUDIO_LOOPBACK = 'pulse-monitor';
+}
+
+configureSystemAudioCapture();
 
 /*
  * Allow WebGL to fall back to software rendering.
@@ -268,14 +315,14 @@ async function runSelfTest(win: BrowserWindow): Promise<void> {
 
     /*
      * The virtual camera binaries are shipped as extra resources, so packaging
-     * can drop them without anything else noticing. Whether the driver is
-     * registered depends on the machine and is not a build problem, but the
+     * can drop them without anything else noticing. Whether the camera is ready
+     * to publish depends on the machine and is not a build problem, but the
      * module failing to load in a packaged build always is.
      */
     const camera = virtualCamera.getStatus();
     console.log(
       `selftest: vcam module=${camera.modulePath || '(missing)'} ` +
-        `driver=${camera.sourcePath || '(missing)'} ` +
+        `source=${camera.sourcePath || '(none)'} ` +
         `available=${camera.available} registered=${camera.registered}` +
         (camera.error ? ` error="${camera.error}"` : ''),
     );
@@ -287,7 +334,17 @@ async function runSelfTest(win: BrowserWindow): Promise<void> {
      * because the build agent has no media stack would be wrong.
      */
     if (!camera.modulePath) problems.push('virtual camera module was not packaged');
-    if (!camera.sourcePath) problems.push('virtual camera driver was not packaged');
+
+    /*
+     * The media source DLL is a file this build either shipped or did not, so
+     * a missing one is unambiguously a packaging defect. Its Linux counterpart
+     * is a loopback device node, which belongs to the running kernel rather
+     * than to the package - absent on any machine that has not loaded
+     * v4l2loopback, and nothing a build could have done about it.
+     */
+    if (process.platform === 'win32' && !camera.sourcePath) {
+      problems.push('virtual camera driver was not packaged');
+    }
   } catch (err) {
     problems.push(`probe failed: ${(err as Error).message}`);
   }
@@ -320,16 +377,21 @@ function installPermissionHandlers(): void {
   );
 
   /*
-   * This is what makes "hear everything the computer plays" work.
+   * This is what makes "hear everything the computer plays" work on Windows.
    *
    * When the renderer calls getDisplayMedia(), we answer with `audio: 'loopback'`,
-   * which is Chromium's WASAPI render-endpoint loopback on Windows (and the
-   * system audio tap on macOS 13+/Linux where available). The user never sees a
+   * which is Chromium's WASAPI render-endpoint loopback. The user never sees a
    * source picker, and we get the full output mix rather than one tab or window.
    *
    * A video source still has to be supplied because getDisplayMedia is defined
    * in terms of video; the renderer stops that track immediately, which leaves
    * the audio track running on its own.
+   *
+   * Linux normally never reaches this handler. PulseAudio and PipeWire publish
+   * a `.monitor` input for every output, so the renderer opens one of those
+   * through getUserMedia instead - fewer moving parts, and it does not depend
+   * on a desktop portal being available. This stays wired up as the fallback
+   * for a machine with no sound server publishing monitors.
    */
   ses.setDisplayMediaRequestHandler(
     (_request, callback) => {
