@@ -58,6 +58,11 @@ jobs:
         env:
           DOMINO_SMOKE_NO_AUDIO: '1'
 
+      # Boots the app against a fake obs-websocket server and a real overlay
+      # page, so both halves of the Stream tab are exercised end to end.
+      - name: Stream test
+        run: npm run test:stream:e2e
+
       - name: Package
         run: npx electron-builder --win --publish never
 
@@ -137,6 +142,11 @@ jobs:
         run: xvfb-run -a npm run test:smoke
         env:
           DOMINO_SMOKE_NO_AUDIO: '1'
+
+      # Boots the app against a fake obs-websocket server and a real overlay
+      # page, so both halves of the Stream tab are exercised end to end.
+      - name: Stream test
+        run: xvfb-run -a npm run test:stream:e2e
 
       - name: Package
         run: npx electron-builder --linux --publish never
