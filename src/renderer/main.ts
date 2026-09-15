@@ -30,6 +30,10 @@ import {
 } from './shadertoy/ShadertoyImport';
 import { ShaderPassBar } from './ui/ShaderPassBar';
 import { DisplayPanel } from './ui/DisplayPanel';
+import { StreamPanel } from './ui/StreamPanel';
+import { ObsClient } from './obs/ObsClient';
+import { ObsDirector } from './obs/ObsDirector';
+import { summarizeFrame, type BridgeStatus, type ObsRule } from '@shared/stream';
 import { CodeEditor, type EditorDocument } from './ui/Editor';
 import { FpsCounter, Toast, el, on } from './ui/dom';
 import { LibraryPanel, LibraryTabs } from './ui/LibraryPanel';
@@ -86,6 +90,12 @@ class Domino {
   private tabs: LibraryTabs;
   private params = new ParamPanel(el('inspector-body'));
   private display!: DisplayPanel;
+  private stream!: StreamPanel;
+  private obs = new ObsClient();
+  private director = new ObsDirector(this.obs);
+  /** Pages on the browser-source feed; frames are only summarised while there are some. */
+  private bridgeClients = 0;
+  private lastBridgeSendMs = 0;
   private editor = new CodeEditor(el('editor-host'), el('editor-tabs'));
   private toast = new Toast(el('toast'));
   private fps = new FpsCounter();
@@ -153,11 +163,13 @@ class Domino {
     stage('reading settings', 0.15);
     this.settings = await window.domino.settings.get();
     this.display = new DisplayPanel(el('display-body'), this.settings);
+    this.stream = new StreamPanel(el('stream-body'), this.settings);
     this.applySettingsToUi();
 
     stage('building the interface', 0.3);
     this.wireLibrary();
     this.wireInspector();
+    this.wireStream();
     this.wireTransport();
     this.wireEditor();
     this.wireStage();
@@ -192,6 +204,9 @@ class Domino {
     window.domino.onCommand((command, payload) => {
       if (command === 'fullscreen-changed' && payload === false && this.immersive) {
         this.setImmersive(false);
+      }
+      if (command === 'bridge-status' && payload && typeof payload === 'object') {
+        this.onBridgeStatus(payload as BridgeStatus);
       }
     });
 
@@ -299,6 +314,7 @@ class Domino {
     const bodies: Record<string, HTMLElement> = {
       preset: el('inspector-body'),
       display: el('display-body'),
+      stream: el('stream-body'),
     };
 
     for (const tab of tabs) {
@@ -306,8 +322,10 @@ class Domino {
         const panel = tab.dataset.panel ?? 'preset';
         for (const other of tabs) other.classList.toggle('is-active', other === tab);
         for (const [name, node] of Object.entries(bodies)) node.hidden = name !== panel;
-        // Reset means different things per tab, so relabel it.
+        // Reset means different things per tab, so relabel it - and the
+        // stream tab has nothing it would sensibly reset.
         el('btn-reset-params').textContent = panel === 'display' ? 'Defaults' : 'Reset';
+        el('btn-reset-params').hidden = panel === 'stream';
       });
     }
 
@@ -322,6 +340,160 @@ class Domino {
       });
     };
     void this.refreshVirtualCameraStatus();
+  }
+
+  /* ------------------------------- stream ------------------------------- */
+
+  /**
+   * The Stream tab: OBS over obs-websocket, and the browser-source feed.
+   *
+   * Both are restored from settings at startup, so a machine set up once
+   * comes back the same way next launch - OBS may not be open yet, and the
+   * client keeps retrying until it is.
+   */
+  private wireStream(): void {
+    const panel = this.stream;
+    panel.render();
+
+    this.obs.onStatus((status) => {
+      const wasConnected = panel.obsStatus.state === 'connected';
+      panel.obsStatus = status;
+      panel.refreshStatus();
+      // Fresh connection: fetch the names the rule fields offer.
+      if (status.state === 'connected' && !wasConnected) void this.refreshObsCatalog();
+    });
+
+    panel.onChange = (patch) => {
+      Object.assign(this.settings, patch);
+      void window.domino.settings.set(patch);
+      // Connection details changed under a live connection: reconnect with them.
+      if (
+        this.settings.obsEnabled &&
+        (patch.obsHost !== undefined || patch.obsPort !== undefined || patch.obsPassword !== undefined)
+      ) {
+        this.setObsEnabled(true);
+      }
+      if (patch.bridgePort !== undefined && this.settings.bridgeEnabled) {
+        void this.setBridgeEnabled(true);
+      }
+      panel.refreshStatus();
+    };
+    panel.onRulesChange = (rules) => this.applyRules(rules);
+    panel.onObsEnabled = (on) => this.setObsEnabled(on);
+    panel.onBridgeEnabled = (on) => void this.setBridgeEnabled(on);
+    panel.onRefreshCatalog = () => void this.refreshObsCatalog();
+    panel.onLookup = (kind, name) => void this.lookupObs(kind, name);
+    panel.onCopyUrl = (url) => {
+      void navigator.clipboard.writeText(url).then(
+        () => this.toast.show(`Copied ${url}`),
+        () => this.toast.show(url),
+      );
+    };
+
+    this.director.setRules(this.settings.obsRules);
+    if (this.settings.obsEnabled) this.setObsEnabled(true);
+    if (this.settings.bridgeEnabled) void this.setBridgeEnabled(true);
+  }
+
+  private applyRules(rules: ObsRule[]): void {
+    this.settings.obsRules = rules;
+    this.director.setRules(rules);
+    void window.domino.settings.set({ obsRules: rules });
+  }
+
+  private setObsEnabled(on: boolean): void {
+    this.settings.obsEnabled = on;
+    void window.domino.settings.set({ obsEnabled: on });
+    if (on) {
+      this.obs.connect(
+        this.settings.obsHost || '127.0.0.1',
+        Number(this.settings.obsPort) || 4455,
+        this.settings.obsPassword,
+      );
+    } else {
+      this.obs.disconnect();
+    }
+  }
+
+  /** Everything the rule fields can offer, in one go. Best effort throughout. */
+  private async refreshObsCatalog(): Promise<void> {
+    const panel = this.stream;
+    if (!this.obs.connected) return;
+    try {
+      const [scenes, inputs, hotkeys] = await Promise.all([
+        this.obs.listScenes(),
+        this.obs.listInputs(),
+        this.obs.listHotkeys(),
+      ]);
+      panel.catalog.scenes = scenes;
+      // Scenes carry filters too, so they belong in the source list as well.
+      panel.catalog.inputs = [...inputs, ...scenes];
+      panel.catalog.hotkeys = hotkeys;
+      panel.catalog.filters.clear();
+      panel.catalog.items.clear();
+      this.director.setScenes(scenes);
+
+      // Detail for whatever the rules already point at.
+      const sources = new Set<string>();
+      const sceneNames = new Set<string>();
+      for (const rule of this.settings.obsRules) {
+        if (rule.action === 'item-pulse' && rule.scene) sceneNames.add(rule.scene);
+        else if (rule.source) sources.add(rule.source);
+      }
+      await Promise.all([
+        ...[...sources].map((s) => this.lookupObs('filters', s, false)),
+        ...[...sceneNames].map((s) => this.lookupObs('items', s, false)),
+      ]);
+      panel.renderRules();
+    } catch (err) {
+      this.toast.show(`OBS: ${(err as Error).message}`, 'error');
+    }
+  }
+
+  private async lookupObs(kind: 'filters' | 'items', name: string, render = true): Promise<void> {
+    const panel = this.stream;
+    if (!this.obs.connected || !name) return;
+    try {
+      if (kind === 'filters') {
+        panel.catalog.filters.set(name, await this.obs.listFilters(name));
+      } else {
+        panel.catalog.items.set(name, (await this.obs.listSceneItems(name)).map((i) => i.source));
+      }
+      if (render) panel.renderRules();
+    } catch {
+      /* a name OBS does not know; the field keeps what was typed */
+    }
+  }
+
+  private async setBridgeEnabled(on: boolean): Promise<void> {
+    this.settings.bridgeEnabled = on;
+    void window.domino.settings.set({ bridgeEnabled: on });
+    // A port change arrives as "enable" again, so always stop first.
+    await window.domino.stream.stopBridge();
+    const status = on
+      ? await window.domino.stream.startBridge(Number(this.settings.bridgePort) || 4477)
+      : await window.domino.stream.bridgeStatus();
+    this.onBridgeStatus(status);
+  }
+
+  private onBridgeStatus(status: BridgeStatus): void {
+    this.bridgeClients = status.running ? status.clients : 0;
+    this.stream.bridgeStatus = status;
+    this.stream.refreshStatus();
+  }
+
+  /**
+   * Feed this frame's analysis to OBS and to the browser-source pages.
+   *
+   * Cheap when nothing is listening: the director returns at once without a
+   * connection, and the summary is only built while a page is connected.
+   */
+  private driveStream(audio: AudioFrame, nowMs: number): void {
+    this.director.tick(audio, nowMs);
+    if (this.bridgeClients > 0 && nowMs - this.lastBridgeSendMs >= 33) {
+      this.lastBridgeSendMs = nowMs;
+      window.domino.stream.sendAudio(summarizeFrame(audio));
+    }
   }
 
   /**
@@ -1459,6 +1631,7 @@ class Domino {
     const audio = this.audio.analyse();
     this.audioTexture.update(audio);
     this.camera.update();
+    this.driveStream(audio, time * 1000);
 
     const gl = this.glctx.gl;
     const width = this.glctx.width;

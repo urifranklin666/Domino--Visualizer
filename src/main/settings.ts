@@ -2,6 +2,7 @@ import { app } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_SETTINGS, type AppSettings } from '@shared/types';
+import { sanitizeRule, type ObsRule } from '@shared/stream';
 
 let cache: AppSettings | null = null;
 let writeChain: Promise<void> = Promise.resolve();
@@ -31,6 +32,12 @@ function sanitize(raw: unknown): AppSettings {
         ) {
           out.lastVisual = { kind, id: v.id };
         }
+      }
+      continue;
+    }
+    if (key === 'obsRules') {
+      if (Array.isArray(value)) {
+        out.obsRules = value.map(sanitizeRule).filter((r): r is ObsRule => r !== null);
       }
       continue;
     }

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' file: blob:; worker-src 'self' blob:;"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' file: blob:; worker-src 'self' blob:; connect-src 'self' ws: wss:;"
     />
     <title>Domino</title>
     <link rel="stylesheet" href="./styles/main.css" />
@@ -99,11 +99,13 @@
           <div class="inspector-tabs" id="inspector-tabs" role="tablist">
             <button class="itab is-active" data-panel="preset" role="tab">Preset</button>
             <button class="itab" data-panel="display" role="tab">Display</button>
+            <button class="itab" data-panel="stream" role="tab">Stream</button>
           </div>
           <button class="btn btn-ghost btn-tiny" id="btn-reset-params">Reset</button>
         </header>
         <div class="inspector-body" id="inspector-body"></div>
         <div class="inspector-body" id="display-body" hidden></div>
+        <div class="inspector-body" id="stream-body" hidden></div>
       </aside>
     </div>
 

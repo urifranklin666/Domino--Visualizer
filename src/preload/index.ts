@@ -9,6 +9,7 @@ import type {
   VirtualCameraStatus,
   WriteResult,
 } from '@shared/types';
+import type { BridgeStatus, StreamAudioFrame } from '@shared/stream';
 
 const api: DominoApi = {
   platform: process.platform,
@@ -92,6 +93,17 @@ const api: DominoApi = {
     setAlwaysOnTop: (v: boolean): Promise<boolean> => ipcRenderer.invoke('window:setAlwaysOnTop', v),
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
     close: (): Promise<void> => ipcRenderer.invoke('window:close'),
+  },
+
+  stream: {
+    bridgeStatus: (): Promise<BridgeStatus> => ipcRenderer.invoke('stream:bridgeStatus'),
+    startBridge: (port: number): Promise<BridgeStatus> =>
+      ipcRenderer.invoke('stream:startBridge', port),
+    stopBridge: (): Promise<BridgeStatus> => ipcRenderer.invoke('stream:stopBridge'),
+    // `send`: the render loop never waits on this.
+    sendAudio: (frame: StreamAudioFrame): void => {
+      ipcRenderer.send('stream:audio', frame);
+    },
   },
 
   splash: {

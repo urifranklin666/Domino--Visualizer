@@ -243,6 +243,76 @@ but on Linux the card label belongs to the kernel module and is fixed when it
 loads. The settings field is advisory there, and the panel tells you what the
 camera is actually called.
 
+### Drives OBS from the music
+
+Open **Stream** in the inspector and switch on **Connect to OBS**. Domino talks
+to the WebSocket server OBS has shipped since version 28 (Tools > WebSocket
+Server Settings; copy the password across). Nothing to install on the OBS
+side.
+
+What it does there is up to a list of **rules**, each one a trigger and an
+action:
+
+| When | Do |
+|---|---|
+| **On the beat** (every Nth) | pulse a filter on for a moment |
+| **Following a level** (bass, treble, volume, beat pulse, tempo…) | write a number into a filter setting, mapped between two values |
+| | show a scene item for a moment, or while a signal is high |
+| | trigger any OBS hotkey |
+| | switch scene, or step to the next one |
+
+So "every beat, switch the *Glitch* filter on my camera on for 120ms", or
+"map the bass into *saturation* on my colour filter between 1 and 3", or
+"every eight beats, fire the studio-mode transition" are each one rule. A
+level rule driving a hotkey or a scene fires as the signal crosses its
+threshold, with a cooldown so a bass line hovering on the line does not
+machine-gun it. The names a rule points at come from OBS itself once it is
+connected, so they can be picked rather than typed; they can still be typed
+when it is not.
+
+Value rules are rate limited to thirty writes a second and only sent when the
+number actually moves; beats go out on the frame they land. Everything is fire
+and forget, so a slow OBS can never hold up the render loop. If OBS refuses a
+request - a filter that was renamed, say - the panel shows its complaint.
+
+One thing worth knowing: OBS's own shader filters (obs-shaderfilter and the
+like) expose their uniforms as settings, which makes **Set a filter value** a
+way to feed the music straight into any shader running inside OBS.
+
+### Serves an audio feed to a Browser Source
+
+Also under **Stream**: switch on **Serve audio feed** and Domino runs a small
+web server on this machine, `http://127.0.0.1:4477/` by default. Add that as a
+**Browser Source** in OBS and you get a spectrum ring over a transparent
+background that breathes with the bass and flashes on the beat, with proper
+alpha - unlike the virtual camera, which is an opaque video frame.
+
+The page is the example; the feed is the point. A Browser Source is a Chromium
+page and a page cannot hear the desktop, so Domino pushes its own analysis
+instead: every frame it renders, it sends the relative bands, loudness, beat,
+tempo, a 64-bin spectrum and a 64-point waveform over a WebSocket as one small
+JSON message, thirty times a second. Any page can use it:
+
+```html
+<script src="http://127.0.0.1:4477/domino-audio.js"></script>
+<script>
+  const feed = DominoAudio.connect();
+  function draw() {
+    requestAnimationFrame(draw);
+    const a = feed.latest;   // { bass, mid, treb, vol, rms, peak, beat, beatPulse,
+                             //   bpm, spectrum: [64], wave: [64], active, ... }
+    ...
+  }
+  draw();
+</script>
+```
+
+The bands are MilkDrop's convention - 1.0 is the track's own recent average,
+2 or 3 is a hit - so an overlay reacts to a quiet track as well as a loud one.
+`/audio.json` holds the latest frame for anything that would rather poll. The
+client reconnects on its own, so an overlay survives Domino being restarted,
+and the server never listens on anything but loopback.
+
 ### Runs MilkDrop presets
 
 **122 presets ship with the app**, spanning MilkDrop 1-style equation presets
@@ -402,7 +472,8 @@ The **Folder** button opens your library directory.
 
 ```
 src/
-  main/          Electron main: window, loopback handler, library IPC, settings
+  main/          Electron main: window, loopback handler, library IPC, settings,
+                 the browser-source bridge (HTTP + WebSocket server)
   preload/       Typed context bridge
   shared/        Types crossing the process boundary
   renderer/
@@ -413,14 +484,18 @@ src/
       eel/       NS-EEL lexer, parser, JS compiler, runtime
       hlsl/      MilkDrop 2 HLSL -> GLSL ES translator
       *.ts       Parser, preset model, warp mesh, blur, decorations, engine
-    ui/          Editor, library browser, parameter and display panels
+    obs/         obs-websocket client and the rules engine that drives it
+    ui/          Editor, library browser, parameter, display and stream panels
 test/
   eel.test.ts     NS-EEL semantics (53 cases)
   milk.test.ts    Parser, serializer, HLSL translation (71 cases)
   shader.test.ts  Pass model, directives, round-trip serialising (68 cases)
   import.test.ts  Shadertoy URL parsing, pass and channel mapping (43 cases)
+  stream.test.ts  Bridge on the wire, obs-websocket auth, rules engine (81 cases)
   smoke.cjs       Boots the real app, loads every visual, verifies audio and
                   fullscreen end to end
+  stream.e2e.cjs  Boots the real app against a fake OBS and a real Browser
+                  Source page
 ```
 
 ---
@@ -428,8 +503,9 @@ test/
 ## Tests
 
 ```bash
-npm test           # 235 unit tests: EEL, .milk parser, HLSL, shader documents
-npm run test:smoke # boots the real app end to end
+npm test                # 320 unit tests: EEL, .milk parser, HLSL, shader documents, stream
+npm run test:smoke      # boots the real app end to end
+npm run test:stream:e2e # boots the real app against a fake OBS and a real overlay page
 npm run typecheck
 ```
 
@@ -447,6 +523,12 @@ static analysis cannot:
   the loopback tap
 - immersive fullscreen actually fills the window, with no leftover row reserved
   for the transport bar, and `Esc` restores the interface
+
+The stream test boots the app the same way, with settings that switch on both
+halves of the Stream tab. It authenticates against a fake obs-websocket server
+inside the harness and checks a seeded rule arrives as a request; then loads
+the served overlay page in a second window and checks it connects, receives
+frames, and is counted by the panel.
 
 ---
 

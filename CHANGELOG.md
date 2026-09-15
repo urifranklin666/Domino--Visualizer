@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+**Domino drives OBS.** A new **Stream** tab connects to OBS Studio's built-in
+WebSocket server and runs a list of rules against the music: pulse a filter on
+every beat, map the bass into a filter setting, show a scene item while the
+treble is up, fire a hotkey every eight beats, step to the next scene on the
+drop. The names a rule points at are fetched from OBS once connected, so they
+are picked rather than typed. Writes are batched, rate limited to thirty a
+second and only sent when a value moves; beats go out on the frame they land;
+nothing waits on OBS. A request OBS refuses shows up in the panel rather than
+failing silently.
+
+**And feeds a Browser Source.** The same tab can serve a small local web page
+- a spectrum ring with a transparent background - that any OBS Browser Source
+can load, with Domino's audio analysis pushed to it over a WebSocket thirty
+times a second. The page is an example: `domino-audio.js` from the same
+address gives any overlay the bands, beat, tempo, spectrum and waveform. The
+server is written directly against the protocol, loopback only, and free of
+Electron so it runs in the unit tests.
+
+**Also**
+
+- `npm run test:stream` covers the bridge on the wire, the obs-websocket auth
+  string, and the rules engine; `npm run test:stream:e2e` boots the app
+  against a fake OBS and a real overlay page.
+- The renderer's Content Security Policy now allows WebSocket connections,
+  which the OBS client needs.
+
 **Domino runs on Linux.** Everything the app does on Windows it now does on a
 Linux desktop too, virtual camera included, and Windows is untouched.
 

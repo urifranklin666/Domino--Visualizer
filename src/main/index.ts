@@ -15,6 +15,8 @@ import {
 import { getSettings, setSettings, flushSettings } from './settings';
 import { fetchShadertoy } from './shadertoy';
 import * as virtualCamera from './virtualcamera';
+import { Bridge } from './bridge';
+import type { StreamAudioFrame } from '@shared/stream';
 
 const isDev = !app.isPackaged;
 
@@ -96,6 +98,7 @@ configureSystemAudioCapture();
 app.commandLine.appendSwitch('enable-unsafe-swiftshader');
 
 let mainWindow: BrowserWindow | null = null;
+const bridge = new Bridge();
 let splashWindow: BrowserWindow | null = null;
 let splashTimeout: NodeJS.Timeout | null = null;
 
@@ -597,6 +600,24 @@ function registerIpc(): void {
   ipcMain.on('vcam:frame', (_e, frame: unknown) => {
     if (frame instanceof Uint8Array) virtualCamera.writeFrame(Buffer.from(frame));
   });
+
+  /*
+   * The browser-source bridge. The renderer only sends frames while a page is
+   * connected, and learns that from the status pushed here on every change,
+   * so an idle bridge costs nothing per frame.
+   */
+  bridge.onClients = () => {
+    mainWindow?.webContents.send('app:command', 'bridge-status', bridge.getStatus());
+  };
+  ipcMain.handle('stream:bridgeStatus', () => bridge.getStatus());
+  ipcMain.handle('stream:startBridge', async (_e, port: unknown) => {
+    const wanted = Number(port);
+    return await bridge.start(Number.isInteger(wanted) && wanted > 0 && wanted < 65536 ? wanted : 4477);
+  });
+  ipcMain.handle('stream:stopBridge', () => bridge.stop());
+  ipcMain.on('stream:audio', (_e, frame: unknown) => {
+    if (frame && typeof frame === 'object') bridge.broadcast(frame as StreamAudioFrame);
+  });
 }
 
 /* ------------------------------ lifecycle ------------------------------ */
@@ -631,6 +652,7 @@ if (!app.requestSingleInstanceLock()) {
     // Unpublish the camera first: an entry left in the device list after the
     // app is gone is a camera that shows nothing.
     virtualCamera.shutdown();
+    void bridge.stop();
     void flushSettings();
   });
 }

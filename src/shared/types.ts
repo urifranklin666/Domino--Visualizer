@@ -3,6 +3,8 @@
  * Keep this file dependency-free so both sides can import it.
  */
 
+import type { BridgeStatus, ObsRule, StreamAudioFrame } from './stream';
+
 export type LibraryKind = 'shader' | 'milk' | 'preset';
 
 export interface LibraryEntry {
@@ -90,6 +92,18 @@ export interface AppSettings {
   virtualCameraFps: number;
   /** What the device is called in other applications. */
   virtualCameraName: string;
+
+  /* OBS: drive scenes, filters and hotkeys from the music over obs-websocket */
+  obsEnabled: boolean;
+  obsHost: string;
+  obsPort: number;
+  /** obs-websocket server password. Stored locally, only ever sent to that host. */
+  obsPassword: string;
+  obsRules: ObsRule[];
+
+  /* Browser source: a local feed any OBS Browser Source can read the audio from */
+  bridgeEnabled: boolean;
+  bridgePort: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -127,6 +141,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   virtualCameraSize: '1280x720',
   virtualCameraFps: 30,
   virtualCameraName: 'Domino Visualizer',
+
+  obsEnabled: false,
+  obsHost: '127.0.0.1',
+  obsPort: 4455,
+  obsPassword: '',
+  obsRules: [],
+
+  bridgeEnabled: false,
+  bridgePort: 4477,
 };
 
 /**
@@ -253,6 +276,15 @@ export interface DominoApi {
     listCameras(): Promise<string[]>;
     /** Fire-and-forget: one NV12 frame, already packed by the GPU. */
     sendFrame(frame: Uint8Array): void;
+  };
+
+  /** The browser-source audio feed, served by the main process. */
+  stream: {
+    bridgeStatus(): Promise<BridgeStatus>;
+    startBridge(port: number): Promise<BridgeStatus>;
+    stopBridge(): Promise<BridgeStatus>;
+    /** Fire-and-forget: one summarised audio frame for whoever is listening. */
+    sendAudio(frame: StreamAudioFrame): void;
   };
 
   /** Progress reporting for the startup splash, which the main process owns. */
